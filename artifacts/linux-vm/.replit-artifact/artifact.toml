@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Browser Linux VM"
+version = "1.0.0"
+id = "artifacts/linux-vm"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23555
+
+[services.development]
+run = "pnpm --filter @workspace/linux-vm run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/linux-vm", "run", "build" ]
+publicDir = "artifacts/linux-vm/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23555"
+BASE_PATH = "/"
