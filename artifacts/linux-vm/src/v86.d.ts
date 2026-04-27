@@ -6,6 +6,22 @@ export interface V86FileLoader {
   use_parts?: boolean;
 }
 
+export interface V86StorageBackend {
+  byteLength: number;
+  block_cache?: Map<number, Uint8Array>;
+  block_cache_is_write?: Set<number>;
+  onload?: (arg?: unknown) => void;
+  onprogress?: (arg?: unknown) => void;
+  load(): void;
+  get(start: number, length: number, cb: (data: Uint8Array) => void): void;
+  set(start: number, slice: Uint8Array, cb: () => void): void;
+  get_state?(): unknown[];
+  set_state?(state: unknown): void;
+  get_buffer?(cb: (buf: ArrayBuffer | null) => void): void;
+}
+
+export type V86Disk = V86FileLoader | V86StorageBackend;
+
 export interface V86Options {
   wasm_path: string;
   memory_size: number;
@@ -14,8 +30,8 @@ export interface V86Options {
   bios?: V86FileLoader;
   vga_bios?: V86FileLoader;
   cdrom?: V86FileLoader;
-  hda?: V86FileLoader;
-  hdb?: V86FileLoader;
+  hda?: V86Disk;
+  hdb?: V86Disk;
   fda?: V86FileLoader;
   bzimage?: V86FileLoader;
   initrd?: V86FileLoader;

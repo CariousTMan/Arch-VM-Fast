@@ -1,6 +1,5 @@
 const DB_NAME = "linux-vm-state";
 const STORE = "states";
-const DISK_STORE = "disks";
 const DB_VERSION = 2;
 
 function openDb(): Promise<IDBDatabase> {
@@ -11,104 +10,9 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE)) {
         db.createObjectStore(STORE);
       }
-      if (!db.objectStoreNames.contains(DISK_STORE)) {
-        db.createObjectStore(DISK_STORE);
-      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error ?? new Error("indexedDB open failed"));
-  });
-}
-
-export interface DiskImageRecord {
-  isoId: string;
-  size: number;
-  updatedAt: number;
-  buffer: ArrayBuffer;
-}
-
-export async function saveDiskImage(
-  isoId: string,
-  buffer: ArrayBuffer,
-): Promise<void> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(DISK_STORE, "readwrite");
-    const record: DiskImageRecord = {
-      isoId,
-      size: buffer.byteLength,
-      updatedAt: Date.now(),
-      buffer,
-    };
-    tx.objectStore(DISK_STORE).put(record, isoId);
-    tx.oncomplete = () => {
-      db.close();
-      resolve();
-    };
-    tx.onerror = () => {
-      db.close();
-      reject(tx.error ?? new Error("saveDiskImage failed"));
-    };
-  });
-}
-
-export async function loadDiskImage(
-  isoId: string,
-): Promise<DiskImageRecord | null> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(DISK_STORE, "readonly");
-    const req = tx.objectStore(DISK_STORE).get(isoId);
-    req.onsuccess = () => {
-      db.close();
-      resolve((req.result as DiskImageRecord | undefined) ?? null);
-    };
-    req.onerror = () => {
-      db.close();
-      reject(req.error ?? new Error("loadDiskImage failed"));
-    };
-  });
-}
-
-export async function deleteDiskImage(isoId: string): Promise<void> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(DISK_STORE, "readwrite");
-    tx.objectStore(DISK_STORE).delete(isoId);
-    tx.oncomplete = () => {
-      db.close();
-      resolve();
-    };
-    tx.onerror = () => {
-      db.close();
-      reject(tx.error ?? new Error("deleteDiskImage failed"));
-    };
-  });
-}
-
-export async function listDiskImages(): Promise<
-  Array<Omit<DiskImageRecord, "buffer">>
-> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(DISK_STORE, "readonly");
-    const req = tx.objectStore(DISK_STORE).openCursor();
-    const out: Array<Omit<DiskImageRecord, "buffer">> = [];
-    req.onsuccess = () => {
-      const cursor = req.result;
-      if (cursor) {
-        const v = cursor.value as DiskImageRecord;
-        out.push({ isoId: v.isoId, size: v.size, updatedAt: v.updatedAt });
-        cursor.continue();
-      } else {
-        db.close();
-        resolve(out.sort((a, b) => b.updatedAt - a.updatedAt));
-      }
-    };
-    req.onerror = () => {
-      db.close();
-      reject(req.error ?? new Error("listDiskImages failed"));
-    };
   });
 }
 

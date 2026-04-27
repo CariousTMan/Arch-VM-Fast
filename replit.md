@@ -33,9 +33,11 @@ Browser-based v86 x86 emulator host. Boots ISO images (Arch, Alpine, FreeDOS, Li
 
 - v86 runtime: assets in `artifacts/linux-vm/public/v86/` (libv86.js, v86.wasm, seabios.bin, vgabios.bin from `v86@0.5.334`)
 - ISO catalog & proxy: `artifacts/api-server/src/routes/iso.ts` — HEAD + GET range requests with CORS / `Cross-Origin-Resource-Policy: cross-origin` for COEP-isolated frontend
-- Persistence: machine snapshots and per-ISO disk images in IndexedDB (`linux-vm-state` DB, stores `states` and `disks`); see `artifacts/linux-vm/src/lib/stateStore.ts`
+- Persistence:
+  - Machine snapshots (CPU + RAM + disk) in IndexedDB (`linux-vm-state` DB, store `states`); see `artifacts/linux-vm/src/lib/stateStore.ts`
+  - Sparse virtual disks in IndexedDB (`linux-vm-disks` DB, stores `meta` + `blocks`, 256 KB chunks per ISO); see `artifacts/linux-vm/src/lib/indexedDbDisk.ts`. Implements v86's storage backend (`byteLength`/`load`/`get`/`set`/`get_state`/`set_state`/`get_buffer`) with an in-memory LRU and 1 s debounced flush.
 - Networking: optional WebSocket relay (`wss://relay.widgetry.org/`)
-- Disk model: in-memory `ArrayBuffer` allocated at boot (default 2 GB, hard cap ~4 GB due to browser ArrayBuffer limits), persisted to IndexedDB on Power off / Save state. Re-used on next boot of the same ISO so installs survive page reloads.
+- Disk model: chunked sparse disk backed by IndexedDB (default 50 GB, max 50 GB). Only blocks the guest actually writes consume browser storage. Disk data persists continuously between boots of the same ISO. Snapshots that include the full disk are limited to disks ≤ 4 GB (`SAVE_STATE_DISK_LIMIT_GB`); above that the Save state button is disabled with a tooltip — disk persistence still works.
 - COOP/COEP: vite.config.ts sets `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` so the WASM gets `SharedArrayBuffer` for full speed.
 
 ### api-server (api)

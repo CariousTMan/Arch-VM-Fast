@@ -5,11 +5,14 @@ import {
   listStates,
   loadState,
   saveState,
-  saveDiskImage,
-  loadDiskImage,
-  deleteDiskImage,
   type SavedStateMeta,
 } from "./lib/stateStore";
+import {
+  IndexedDbDisk,
+  ensureDiskMeta,
+  deleteDisk,
+  diskUsage,
+} from "./lib/indexedDbDisk";
 import type { V86Instance } from "./v86";
 
 interface IsoDescriptor {
@@ -42,12 +45,13 @@ const HD_PERSIST_KEY = "default";
 const DEFAULTS: Omit<BootProfile, "isoId" | "isoName" | "isoUrl"> = {
   memoryMb: 1024,
   vgaMemoryMb: 32,
-  diskGb: 2,
+  diskGb: 50,
   networking: true,
   bootFromHd: false,
 };
 
-const MAX_DISK_GB = 4;
+const MAX_DISK_GB = 50;
+const SAVE_STATE_DISK_LIMIT_GB = 4;
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -84,7 +88,7 @@ export default function App() {
   const screenContainerRef = useRef<HTMLDivElement>(null);
   const emulatorRef = useRef<V86Instance | null>(null);
   const profileRef = useRef<BootProfile | null>(null);
-  const diskBufferRef = useRef<ArrayBuffer | null>(null);
+  const diskRef = useRef<IndexedDbDisk | null>(null);
 
   const apiBase = useMemo(() => {
     const base = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -132,12 +136,13 @@ export default function App() {
 
   const persistDisk = useCallback(async () => {
     const profile = profileRef.current;
-    const buf = diskBufferRef.current;
-    if (!profile || !buf) return;
+    const disk = diskRef.current;
+    if (!profile || !disk) return;
     try {
-      await saveDiskImage(profile.isoId, buf);
+      await disk.flush();
+      const usage = await diskUsage(profile.isoId);
       pushLog(
-        `Persisted virtual disk for "${profile.isoId}" (${fmtBytes(buf.byteLength)}).`,
+        `Flushed virtual disk for "${profile.isoId}" — ${usage.blockCount} blocks, ${fmtBytes(usage.usedBytes)} on disk.`,
       );
     } catch (err) {
       pushLog(`Could not persist disk: ${String(err)}`);
@@ -155,7 +160,7 @@ export default function App() {
       emulatorRef.current = null;
     }
     profileRef.current = null;
-    diskBufferRef.current = null;
+    diskRef.current = null;
     setMouseLocked(false);
     setNetStatus("off");
   }, []);
@@ -210,32 +215,23 @@ export default function App() {
 
         setPhase({
           kind: "loading",
-          step: "Preparing virtual hard disk...",
+          step: "Preparing sparse virtual hard disk...",
         });
-        const existingDisk = await loadDiskImage(profile.isoId);
-        let diskBuffer: ArrayBuffer;
-        if (existingDisk && existingDisk.size === profile.diskGb * 1024 ** 3) {
-          diskBuffer = existingDisk.buffer;
+        const diskBytes = profile.diskGb * 1024 ** 3;
+        const meta = await ensureDiskMeta(profile.isoId, diskBytes);
+        const usage = await diskUsage(profile.isoId);
+        const disk = new IndexedDbDisk(profile.isoId, diskBytes);
+        diskRef.current = disk;
+        if (usage.blockCount > 0) {
           pushLog(
-            `Reusing saved disk for "${profile.isoId}" (${fmtBytes(existingDisk.size)})`,
+            `Reusing sparse disk for "${profile.isoId}" — ${profile.diskGb} GB virtual, ${fmtBytes(usage.usedBytes)} actually stored across ${usage.blockCount} blocks.`,
           );
         } else {
-          if (existingDisk) {
-            pushLog(
-              `Disk size changed (${fmtBytes(existingDisk.size)} → ${profile.diskGb} GB). Allocating fresh disk.`,
-            );
-            await deleteDiskImage(profile.isoId);
-          }
-          try {
-            diskBuffer = new ArrayBuffer(profile.diskGb * 1024 ** 3);
-          } catch (allocErr) {
-            throw new Error(
-              `Could not allocate ${profile.diskGb} GB virtual disk in this browser (${String(allocErr)}). Try a smaller disk size.`,
-            );
-          }
-          pushLog(`Allocated blank ${profile.diskGb} GB virtual disk.`);
+          pushLog(
+            `Created blank sparse disk for "${profile.isoId}" — ${profile.diskGb} GB virtual, 0 bytes stored until you write.`,
+          );
         }
-        diskBufferRef.current = diskBuffer;
+        void meta;
 
         setPhase({
           kind: "loading",
@@ -256,7 +252,7 @@ export default function App() {
           cdrom: initialState
             ? undefined
             : { url: profile.isoUrl, async: true },
-          hda: initialState ? undefined : { buffer: diskBuffer, async: false },
+          hda: initialState ? undefined : disk,
           initial_state: initialState ? { buffer: initialState } : undefined,
           network_relay_url: profile.networking
             ? "wss://relay.widgetry.org/"
@@ -367,11 +363,19 @@ export default function App() {
     em.lock_mouse();
   }, []);
 
+  const canSnapshot = diskGb <= SAVE_STATE_DISK_LIMIT_GB;
+
   const handleSaveState = useCallback(async () => {
     const em = emulatorRef.current;
     const profile = profileRef.current;
     if (!em || !profile) {
       pushLog("Nothing to save — VM is not running.");
+      return;
+    }
+    if (profile.diskGb > SAVE_STATE_DISK_LIMIT_GB) {
+      pushLog(
+        `Snapshots are disabled when disk > ${SAVE_STATE_DISK_LIMIT_GB} GB. Use Power off — disk is already persisted continuously to IndexedDB.`,
+      );
       return;
     }
     const key = window.prompt(
@@ -492,9 +496,10 @@ export default function App() {
             onChange={setDiskGb}
           />
           <div className="hint">
-            Disk lives in browser memory while running and is persisted to
-            IndexedDB on Power off / Save state. Browser ArrayBuffer limits
-            cap the size at ~{MAX_DISK_GB} GB.
+            Sparse, IndexedDB-backed. Only blocks v86 actually writes use real
+            browser storage, so a {MAX_DISK_GB} GB disk costs nothing until
+            you install something onto it. Changing the size for an installed
+            ISO erases its existing disk.
           </div>
 
           <SectionHeader title="Boot" subtitle="" />
@@ -607,7 +612,12 @@ export default function App() {
               <button
                 className="btn btn-sm"
                 onClick={() => void handleSaveState()}
-                disabled={phase.kind !== "running"}
+                disabled={phase.kind !== "running" || !canSnapshot}
+                title={
+                  canSnapshot
+                    ? "Snapshot CPU + RAM + disk to local storage"
+                    : `Snapshots disabled for disks > ${SAVE_STATE_DISK_LIMIT_GB} GB. Disk persists continuously to IndexedDB.`
+                }
               >
                 Save state
               </button>
