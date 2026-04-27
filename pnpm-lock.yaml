@@ -227,6 +227,9 @@ importers:
       '@xterm/xterm':
         specifier: ^6.0.0
         version: 6.0.0
+      v86:
+        specifier: ^0.5.334
+        version: 0.5.334
     devDependencies:
       '@hookform/resolvers':
         specifier: ^3.10.0
@@ -3094,6 +3097,9 @@ packages:
   util-deprecate@1.0.2:
     resolution: {integrity: sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw==}
 
+  v86@0.5.334:
+    resolution: {integrity: sha512-P5QMpuB6tmd/KRFR77QJyl6W+RN1mP+9JR7kynBDFFix/RLnqrnFC5/R7PcSDId8UTkD778ClOxCjBbjV6zKhw==}
+
   vary@1.1.2:
     resolution: {integrity: sha512-BNGbWLfd0eUPabhkXUVm0j8uuvREyTh5ovRa/dyow/BqAbZJyC+5fU+IzQOzmAKzYqYRAISoRhdQr3eIZ/PXqg==}
     engines: {node: '>= 0.8'}
@@ -5652,6 +5658,8 @@ snapshots:
       react: 19.1.0
 
   util-deprecate@1.0.2: {}
+
+  v86@0.5.334: {}
 
   vary@1.1.2: {}
 
