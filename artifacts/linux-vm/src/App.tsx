@@ -5,6 +5,9 @@ import {
   listStates,
   loadState,
   saveState,
+  saveDiskImage,
+  loadDiskImage,
+  deleteDiskImage,
   type SavedStateMeta,
 } from "./lib/stateStore";
 import type { V86Instance } from "./v86";
@@ -39,10 +42,12 @@ const HD_PERSIST_KEY = "default";
 const DEFAULTS: Omit<BootProfile, "isoId" | "isoName" | "isoUrl"> = {
   memoryMb: 1024,
   vgaMemoryMb: 32,
-  diskGb: 50,
+  diskGb: 2,
   networking: true,
   bootFromHd: false,
 };
+
+const MAX_DISK_GB = 4;
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -79,6 +84,7 @@ export default function App() {
   const screenContainerRef = useRef<HTMLDivElement>(null);
   const emulatorRef = useRef<V86Instance | null>(null);
   const profileRef = useRef<BootProfile | null>(null);
+  const diskBufferRef = useRef<ArrayBuffer | null>(null);
 
   const apiBase = useMemo(() => {
     const base = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -124,6 +130,20 @@ export default function App() {
     void refreshSavedStates();
   }, [refreshSavedStates]);
 
+  const persistDisk = useCallback(async () => {
+    const profile = profileRef.current;
+    const buf = diskBufferRef.current;
+    if (!profile || !buf) return;
+    try {
+      await saveDiskImage(profile.isoId, buf);
+      pushLog(
+        `Persisted virtual disk for "${profile.isoId}" (${fmtBytes(buf.byteLength)}).`,
+      );
+    } catch (err) {
+      pushLog(`Could not persist disk: ${String(err)}`);
+    }
+  }, [pushLog]);
+
   const teardown = useCallback(() => {
     const em = emulatorRef.current;
     if (em) {
@@ -135,6 +155,7 @@ export default function App() {
       emulatorRef.current = null;
     }
     profileRef.current = null;
+    diskBufferRef.current = null;
     setMouseLocked(false);
     setNetStatus("off");
   }, []);
@@ -169,10 +190,6 @@ export default function App() {
 
       try {
         const V86 = await loadV86();
-        setPhase({
-          kind: "loading",
-          step: "Allocating sparse virtual disk...",
-        });
 
         const container = screenContainerRef.current;
         if (!container) throw new Error("Screen container missing");
@@ -193,6 +210,35 @@ export default function App() {
 
         setPhase({
           kind: "loading",
+          step: "Preparing virtual hard disk...",
+        });
+        const existingDisk = await loadDiskImage(profile.isoId);
+        let diskBuffer: ArrayBuffer;
+        if (existingDisk && existingDisk.size === profile.diskGb * 1024 ** 3) {
+          diskBuffer = existingDisk.buffer;
+          pushLog(
+            `Reusing saved disk for "${profile.isoId}" (${fmtBytes(existingDisk.size)})`,
+          );
+        } else {
+          if (existingDisk) {
+            pushLog(
+              `Disk size changed (${fmtBytes(existingDisk.size)} → ${profile.diskGb} GB). Allocating fresh disk.`,
+            );
+            await deleteDiskImage(profile.isoId);
+          }
+          try {
+            diskBuffer = new ArrayBuffer(profile.diskGb * 1024 ** 3);
+          } catch (allocErr) {
+            throw new Error(
+              `Could not allocate ${profile.diskGb} GB virtual disk in this browser (${String(allocErr)}). Try a smaller disk size.`,
+            );
+          }
+          pushLog(`Allocated blank ${profile.diskGb} GB virtual disk.`);
+        }
+        diskBufferRef.current = diskBuffer;
+
+        setPhase({
+          kind: "loading",
           step: profile.bootFromHd
             ? "Booting installed system from virtual hard disk..."
             : `Streaming ${iso.name} ISO from proxy...`,
@@ -210,9 +256,7 @@ export default function App() {
           cdrom: initialState
             ? undefined
             : { url: profile.isoUrl, async: true },
-          hda: initialState
-            ? undefined
-            : { size: profile.diskGb * 1024 * 1024 * 1024, async: true },
+          hda: initialState ? undefined : { buffer: diskBuffer, async: false },
           initial_state: initialState ? { buffer: initialState } : undefined,
           network_relay_url: profile.networking
             ? "wss://relay.widgetry.org/"
@@ -283,11 +327,12 @@ export default function App() {
     ],
   );
 
-  const stop = useCallback(() => {
+  const stop = useCallback(async () => {
+    await persistDisk();
     teardown();
     setPhase({ kind: "stopped" });
     pushLog("VM destroyed.");
-  }, [pushLog, teardown]);
+  }, [persistDisk, pushLog, teardown]);
 
   const restart = useCallback(() => {
     const em = emulatorRef.current;
@@ -339,11 +384,12 @@ export default function App() {
       const state = await em.save_state();
       const meta = await saveState(key, profile.isoId, state);
       pushLog(`Saved "${key}" (${fmtBytes(meta.size)}) to local storage.`);
+      await persistDisk();
       void refreshSavedStates();
     } catch (err) {
       pushLog(`Save failed: ${String(err)}`);
     }
-  }, [pushLog, refreshSavedStates]);
+  }, [persistDisk, pushLog, refreshSavedStates]);
 
   const handleRestoreSlot = useCallback(
     async (slot: SavedStateMeta) => {
@@ -439,14 +485,16 @@ export default function App() {
             label="Virtual disk"
             value={diskGb}
             min={1}
-            max={128}
+            max={MAX_DISK_GB}
             step={1}
             unit="GB"
             disabled={isRunning}
             onChange={setDiskGb}
           />
           <div className="hint">
-            Disk is sparse — only written blocks consume browser storage.
+            Disk lives in browser memory while running and is persisted to
+            IndexedDB on Power off / Save state. Browser ArrayBuffer limits
+            cap the size at ~{MAX_DISK_GB} GB.
           </div>
 
           <SectionHeader title="Boot" subtitle="" />
@@ -481,7 +529,7 @@ export default function App() {
                 </button>
                 <button
                   className="btn btn-full btn-danger"
-                  onClick={stop}
+                  onClick={() => void stop()}
                 >
                   ⏻ Power off
                 </button>
