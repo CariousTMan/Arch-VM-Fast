@@ -36,6 +36,7 @@ export interface V86Options {
   bzimage?: V86FileLoader;
   initrd?: V86FileLoader;
   cmdline?: string;
+  bzimage_initrd_from_filesystem?: boolean;
   initial_state?: V86FileLoader;
   filesystem?: { basefs?: V86FileLoader; baseurl?: string };
   network_relay_url?: string;

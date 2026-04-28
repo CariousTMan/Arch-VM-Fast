@@ -20,6 +20,8 @@ interface IsoDescriptor {
   name: string;
   description: string;
   proxyUrl: string;
+  directBoot?: boolean;
+  directBootInfoUrl?: string | null;
 }
 
 interface BootProfile {
@@ -31,6 +33,33 @@ interface BootProfile {
   diskGb: number;
   networking: boolean;
   bootFromHd: boolean;
+  fastBoot: boolean;
+  directBootCapable: boolean;
+}
+
+type DirectBootStatus =
+  | { state: "absent" }
+  | { state: "preparing"; step: string; bytesDone: number; bytesTotal?: number }
+  | {
+      state: "ready";
+      assets: {
+        kernelFile: string;
+        initrdFile: string;
+        volumeLabel: string;
+        cmdline: string;
+        kernelSize: number;
+        initrdSize: number;
+      };
+    }
+  | { state: "error"; message: string };
+
+interface DirectBootInfo {
+  id: string;
+  status: DirectBootStatus;
+  cmdline: string | null;
+  kernelUrl: string;
+  initrdUrl: string;
+  cdromUrl: string;
 }
 
 type Phase =
@@ -42,12 +71,16 @@ type Phase =
 
 const HD_PERSIST_KEY = "default";
 
-const DEFAULTS: Omit<BootProfile, "isoId" | "isoName" | "isoUrl"> = {
-  memoryMb: 1024,
+const DEFAULTS: Omit<
+  BootProfile,
+  "isoId" | "isoName" | "isoUrl" | "directBootCapable"
+> = {
+  memoryMb: 2048,
   vgaMemoryMb: 32,
   diskGb: 50,
   networking: true,
   bootFromHd: false,
+  fastBoot: true,
 };
 
 const MAX_DISK_GB = 50;
@@ -58,6 +91,83 @@ function fmtBytes(n: number): string {
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+async function ensureDirectBootReady(
+  apiBase: string,
+  isoId: string,
+  infoUrlAbs: string,
+  log: (msg: string) => void,
+  step: (msg: string) => void,
+): Promise<DirectBootInfo | null> {
+  const infoUrl = `${apiBase}${infoUrlAbs.replace(/^\/api/, "")}`;
+  const prepareUrl = `${infoUrl}/prepare`;
+
+  const fetchInfo = async (): Promise<DirectBootInfo> => {
+    const r = await fetch(infoUrl);
+    if (!r.ok) throw new Error(`Direct boot info HTTP ${r.status}`);
+    return r.json();
+  };
+
+  let info = await fetchInfo();
+  if (info.status.state === "ready") {
+    log(`Fast-boot assets ready for ${isoId} (cached on server).`);
+    return info;
+  }
+
+  if (info.status.state !== "preparing") {
+    step(
+      `Preparing fast-boot assets for ${isoId} (one-time download + extract on server, ~30-90s)...`,
+    );
+    log(`Requesting server-side prep of ${isoId} kernel + initramfs...`);
+    const r = await fetch(prepareUrl, { method: "POST" });
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      log(`Direct boot prepare failed: HTTP ${r.status} ${text}`);
+      return null;
+    }
+    void (await r.json().catch(() => null));
+    info = await fetchInfo();
+  }
+
+  let lastLogged = "";
+  const start = Date.now();
+  while (info.status.state === "preparing") {
+    const s = info.status;
+    let msg = s.step;
+    if (s.bytesTotal && s.bytesTotal > 0) {
+      const pct = ((s.bytesDone / s.bytesTotal) * 100).toFixed(1);
+      const mbDone = (s.bytesDone / (1024 * 1024)).toFixed(1);
+      const mbTotal = (s.bytesTotal / (1024 * 1024)).toFixed(0);
+      msg = `${s.step} ${mbDone}/${mbTotal} MB (${pct}%)`;
+    } else if (s.bytesDone > 0) {
+      const mbDone = (s.bytesDone / (1024 * 1024)).toFixed(1);
+      msg = `${s.step} ${mbDone} MB`;
+    }
+    step(`Preparing fast-boot assets: ${msg}`);
+    if (msg !== lastLogged) {
+      log(`Server prep: ${msg}`);
+      lastLogged = msg;
+    }
+    if (Date.now() - start > 5 * 60 * 1000) {
+      log("Direct boot prep timed out after 5 minutes.");
+      return null;
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+    info = await fetchInfo();
+  }
+
+  if (info.status.state === "error") {
+    log(`Direct boot prep error: ${info.status.message}`);
+    return null;
+  }
+  if (info.status.state === "ready") {
+    log(
+      `Fast-boot ready: kernel ${(info.status.assets.kernelSize / (1024 * 1024)).toFixed(1)} MB, initramfs ${(info.status.assets.initrdSize / (1024 * 1024)).toFixed(1)} MB.`,
+    );
+    return info;
+  }
+  return null;
 }
 
 function fmtAgo(ts: number): string {
@@ -76,6 +186,7 @@ export default function App() {
   const [diskGb, setDiskGb] = useState(DEFAULTS.diskGb);
   const [networking, setNetworking] = useState(DEFAULTS.networking);
   const [bootFromHd, setBootFromHd] = useState(DEFAULTS.bootFromHd);
+  const [fastBoot, setFastBoot] = useState(DEFAULTS.fastBoot);
 
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [savedStates, setSavedStates] = useState<SavedStateMeta[]>([]);
@@ -187,6 +298,8 @@ export default function App() {
         diskGb,
         networking,
         bootFromHd,
+        fastBoot,
+        directBootCapable: !!iso.directBoot,
       };
       profileRef.current = profile;
 
@@ -233,11 +346,34 @@ export default function App() {
         }
         void meta;
 
+        let directBoot: DirectBootInfo | null = null;
+        const useDirectBoot =
+          !initialState &&
+          !profile.bootFromHd &&
+          profile.fastBoot &&
+          profile.directBootCapable &&
+          iso.directBootInfoUrl;
+        if (useDirectBoot) {
+          directBoot = await ensureDirectBootReady(
+            apiBase,
+            iso.id,
+            iso.directBootInfoUrl!,
+            (msg) => {
+              pushLog(msg);
+            },
+            (step) => {
+              setPhase({ kind: "loading", step });
+            },
+          );
+        }
+
         setPhase({
           kind: "loading",
           step: profile.bootFromHd
             ? "Booting installed system from virtual hard disk..."
-            : `Streaming ${iso.name} ISO from proxy...`,
+            : directBoot
+              ? `Direct-booting ${iso.name} kernel (skipping BIOS + bootloader)...`
+              : `Streaming ${iso.name} ISO from proxy...`,
         });
 
         if (profile.networking) setNetStatus("connecting");
@@ -247,11 +383,20 @@ export default function App() {
           memory_size: profile.memoryMb * 1024 * 1024,
           vga_memory_size: profile.vgaMemoryMb * 1024 * 1024,
           screen_container: container,
-          bios: { url: v86AssetUrl("seabios.bin") },
+          bios: directBoot ? undefined : { url: v86AssetUrl("seabios.bin") },
           vga_bios: { url: v86AssetUrl("vgabios.bin") },
           cdrom: initialState
             ? undefined
             : { url: profile.isoUrl, async: true },
+          bzimage: directBoot
+            ? { url: `${apiBase}${directBoot.kernelUrl.replace(/^\/api/, "")}` }
+            : undefined,
+          initrd: directBoot
+            ? { url: `${apiBase}${directBoot.initrdUrl.replace(/^\/api/, "")}` }
+            : undefined,
+          cmdline:
+            directBoot && directBoot.cmdline ? directBoot.cmdline : undefined,
+          bzimage_initrd_from_filesystem: false,
           hda: initialState ? undefined : disk,
           initial_state: initialState ? { buffer: initialState } : undefined,
           network_relay_url: profile.networking
@@ -569,6 +714,13 @@ export default function App() {
             onChange={setBootFromHd}
             disabled={isRunning}
             hint="Use after you've installed the OS to the virtual disk."
+          />
+          <Toggle
+            label="Fast boot (skip BIOS/bootloader for Arch)"
+            checked={fastBoot}
+            onChange={setFastBoot}
+            disabled={isRunning || bootFromHd}
+            hint="Server extracts the ISO's kernel + initramfs once (~30-90s the first time), then v86 jumps straight into Linux. Saves 60-110s of SeaBIOS/isolinux delay on every subsequent boot."
           />
 
           <div className="primary-actions">
