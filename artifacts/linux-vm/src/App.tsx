@@ -351,11 +351,65 @@ export default function App() {
     pushLog("Sent Ctrl+Alt+Del");
   }, [pushLog]);
 
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const screenFrameRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onChange = () => {
+      if (!document.fullscreenElement) setIsFullscreen(false);
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !document.fullscreenElement) {
+        setIsFullscreen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isFullscreen]);
+
+  const exitFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => undefined);
+    }
+    setIsFullscreen(false);
+  }, []);
+
   const goFullscreen = useCallback(() => {
     const em = emulatorRef.current;
-    if (!em) return;
-    em.screen_go_fullscreen();
-  }, []);
+    const frame = screenFrameRef.current;
+    if (!em || !frame) return;
+
+    setIsFullscreen(true);
+
+    const tryNative = async () => {
+      if (!frame.requestFullscreen) return false;
+      try {
+        await frame.requestFullscreen({ navigationUI: "hide" });
+        try {
+          em.lock_mouse();
+        } catch {
+          /* mouse lock is best-effort */
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    void tryNative().then((ok) => {
+      if (!ok) {
+        pushLog(
+          "Browser blocked native fullscreen (sandboxed iframe). Using maximized view instead — press Esc to exit.",
+        );
+      }
+    });
+  }, [pushLog]);
 
   const lockMouse = useCallback(() => {
     const em = emulatorRef.current;
@@ -631,7 +685,20 @@ export default function App() {
             </div>
           </div>
 
-          <div className="screen-frame">
+          <div
+            ref={screenFrameRef}
+            className={`screen-frame${isFullscreen ? " is-maximized" : ""}`}
+          >
+            {isFullscreen && (
+              <button
+                type="button"
+                className="exit-fullscreen-btn"
+                onClick={exitFullscreen}
+                title="Exit fullscreen (Esc)"
+              >
+                Exit fullscreen (Esc)
+              </button>
+            )}
             <div ref={screenContainerRef} className="screen-container">
               <canvas className="v86-canvas" />
               <div className="v86-text" />
